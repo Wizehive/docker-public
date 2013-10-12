@@ -1101,6 +1101,22 @@ func (srv *Server) ImageDelete(name string, autoPrune bool) ([]APIRmi, error) {
 	if err != nil {
 		return nil, fmt.Errorf("No such image: %s", name)
 	}
+
+	// Check for any running containers and error if found
+	toRemove := []string{}
+
+	for e := srv.runtime.containers.Front(); e != nil; e = e.Next() {
+		c := e.Value.(*Container)
+		if c.Image == img.ID {
+			toRemove = append(toRemove, c.ID)
+		}
+	}
+
+	if len(toRemove) > 0 {
+		return nil, fmt.Errorf("Cannot delete image with existing containers.  Please remove %s before deleting image.",
+			strings.Join(toRemove, ", "))
+	}
+
 	if !autoPrune {
 		if err := srv.runtime.DeleteImage(img.ID); err != nil {
 			return nil, fmt.Errorf("Error deleting image %s: %s", name, err)

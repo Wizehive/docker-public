@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -285,14 +285,14 @@ func (devices *DeviceSetDM) setupBaseImage() error {
 
 	info, err := devices.registerDevice(id, "", defaultBaseFsSize)
 	if err != nil {
-		_ = deleteDevice(devices.getPoolDevName(), id)
+		deleteDevice(devices.getPoolDevName(), id)
 		utils.Debugf("\n--->Err: %s\n", err)
 		return err
 	}
 
 	utils.Debugf("Creating filesystem on base device-manager snapshot")
 
-	if err = devices.activateDeviceIfNeeded(""); err != nil {
+	if err := devices.activateDeviceIfNeeded(""); err != nil {
 		utils.Debugf("\n--->Err: %s\n", err)
 		return err
 	}
@@ -303,7 +303,7 @@ func (devices *DeviceSetDM) setupBaseImage() error {
 	}
 
 	info.Initialized = true
-	if err = devices.saveMetadata(); err != nil {
+	if err := devices.saveMetadata(); err != nil {
 		info.Initialized = false
 		utils.Debugf("\n--->Err: %s\n", err)
 		return err
@@ -317,7 +317,7 @@ func setCloseOnExec(name string) {
 	if fileInfos != nil {
 		for _, i := range fileInfos {
 			link, _ := os.Readlink(filepath.Join("/proc/self/fd", i.Name()))
-			if link ==  name {
+			if link == name {
 				fd, err := strconv.Atoi(i.Name())
 				if err == nil {
 					syscall.CloseOnExec(fd)
@@ -327,7 +327,7 @@ func setCloseOnExec(name string) {
 	}
 }
 
-func (devices *DeviceSetDM) log(level int, file string, line int, dmError int, message string)  {
+func (devices *DeviceSetDM) log(level int, file string, line int, dmError int, message string) {
 	if level >= 7 {
 		return // Ignore _LOG_DEBUG
 	}
@@ -335,23 +335,46 @@ func (devices *DeviceSetDM) log(level int, file string, line int, dmError int, m
 	utils.Debugf("libdevmapper(%d): %s:%d (%d) %s", level, file, line, dmError, message)
 }
 
-
 func (devices *DeviceSetDM) initDevmapper() error {
 	logInit(devices)
 
+begin:
 	info, err := getInfo(devices.getPoolName())
 	if info == nil {
 		utils.Debugf("Error device getInfo: %s", err)
 		return err
 	}
-	utils.Debugf("initDevmapper(). Pool exists: %v", info.Exists)
+
+	// Make sure the control file exists
+	if _, err := os.Stat("/dev/mapper/control"); err != nil {
+		return err
+	}
+
+	loopbackExists := false
+	// Check if the loopback file exsts
+	if _, err := os.Stat(devices.loopbackDir()); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// If it does not, then we use a different pool name
+		devices.devicePrefix += "-nested"
+	} else {
+		loopbackExists = true
+	}
+
+	// If the pool exists but the loopback does not, then we start again
+	if info.Exists == 1 && !loopbackExists {
+		goto begin
+	}
+
+	utils.Debugf("initDevmapper(). Pool exists: %v, loopback Exists: %v", info.Exists, loopbackExists)
 
 	// It seems libdevmapper opens this without O_CLOEXEC, and go exec will not close files
 	// that are not Close-on-exec, and lxc-start will die if it inherits any unexpected files,
 	// so we add this badhack to make sure it closes itself
 	setCloseOnExec("/dev/mapper/control")
 
-	if info.Exists != 0 {
+	if info.Exists != 0 && loopbackExists {
 		/* Pool exists, assume everything is up */
 		if err := devices.loadMetaData(); err != nil {
 			utils.Debugf("Error device loadMetaData: %s\n", err)
@@ -495,7 +518,6 @@ func (devices *DeviceSetDM) RemoveDevice(hash string) error {
 		return err
 	}
 
-
 	return devices.removeDevice(hash)
 }
 
@@ -530,9 +552,8 @@ func (devices *DeviceSetDM) DeactivateDevice(hash string) error {
 	}
 
 	utils.Debugf("DeactivateDevice %s", hash)
-	return devices.deactivateDevice(hash);
+	return devices.deactivateDevice(hash)
 }
-
 
 func (devices *DeviceSetDM) Shutdown() error {
 	devices.Lock()

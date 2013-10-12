@@ -215,8 +215,7 @@ func ParseRun(args []string, capabilities *Capabilities) (*Config, *HostConfig, 
 	hostname := *flHostname
 	domainname := ""
 
-	parts := strings.SplitN(hostname, ".", 2)
-	if len(parts) > 1 {
+	if parts := strings.SplitN(hostname, ".", 2); len(parts) > 1 {
 		hostname = parts[0]
 		domainname = parts[1]
 	}

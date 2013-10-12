@@ -371,7 +371,11 @@ func TestStart(t *testing.T) {
 func TestRun(t *testing.T) {
 	runtime := mkRuntime(t)
 	defer nuke(runtime)
-	container, _, _ := mkContainer(runtime, []string{"_", "ls", "-al"}, t)
+
+	container, _, err := mkContainer(runtime, []string{"_", "ls", "-al"}, t)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer runtime.Destroy(container)
 
 	if container.State.Running {
@@ -388,6 +392,7 @@ func TestRun(t *testing.T) {
 func TestOutput(t *testing.T) {
 	runtime := mkRuntime(t)
 	defer nuke(runtime)
+
 	container, err := runtime.Create(
 		&Config{
 			Image: GetTestImage(runtime).ID,

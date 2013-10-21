@@ -7,6 +7,7 @@ VF_BOX_URI = ENV['BOX_URI'] || "http://files.vagrantup.com/precise64_vmware_fusi
 AWS_REGION = ENV['AWS_REGION'] || "us-east-1"
 AWS_AMI    = ENV['AWS_AMI']    || "ami-d0f89fb9"
 FORWARD_DOCKER_PORTS = ENV['FORWARD_DOCKER_PORTS']
+PRIVATE_IP = ENV['PRIVATE_IP'] || "10.0.18.2"
 
 Vagrant::Config.run do |config|
   # Setup virtual machine box. This VM configuration code is always executed.
@@ -100,5 +101,8 @@ if !FORWARD_DOCKER_PORTS.nil?
 end
 
 Vagrant::VERSION >= "1.1.0" and Vagrant.configure("2") do |config|
-  config.vm.network "private_network", ip: "10.0.18.2"
+  config.vm.network "private_network", ip: PRIVATE_IP
+    config.vm.provision :hosts do |provisioner|
+      provisioner.add_host PRIVATE_IP, ['wizehive.dev', 'www.wizehive.dev']
+    end
 end

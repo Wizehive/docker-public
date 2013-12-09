@@ -5,13 +5,14 @@ So you're in charge of a Docker release? Cool. Here's what to do.
 If your experience deviates from this document, please document the changes
 to keep it up-to-date.
 
-
 ### 1. Pull from master and create a release branch
 
 ```bash
-git checkout master
+export VERSION=vXXX
+git checkout release
 git pull
 git checkout -b bump_$VERSION
+git merge origin/master
 ```
 
 ### 2. Update CHANGELOG.md
@@ -53,53 +54,79 @@ EXAMPLES:
 
 ### 3. Change the contents of the VERSION file
 
+```bash
+echo ${VERSION#v} > VERSION
+```
+
 ### 4. Run all tests
 
-FIXME
+```bash
+docker run -privileged docker hack/make.sh test
+```
 
-### 5. Commit and create a pull request to the "release" branch
+### 5. Test the docs
+
+Make sure that your tree includes documentation for any modified or
+new features, syntax or semantic changes. Instructions for building
+the docs are in ``docs/README.md``
+
+### 6. Commit and create a pull request to the "release" branch
 
 ```bash
-git add CHANGELOG.md
+git add VERSION CHANGELOG.md
 git commit -m "Bump version to $VERSION"
 git push origin bump_$VERSION
 ```
 
-### 6. Get 2 other maintainers to validate the pull request
+### 7. Get 2 other maintainers to validate the pull request
 
-### 7. Merge the pull request and apply tags
+### 8. Apply tag
 
 ```bash
-git checkout release
-git merge bump_$VERSION
-git tag -a v$VERSION # Don't forget the v!
-git tag -f -a latest
-git push
-git push --tags
+git tag -a $VERSION -m $VERSION bump_$VERSION
+git push origin $VERSION
 ```
 
-### 8. Publish binaries
+Merging the pull request to the release branch will automatically
+update the documentation on the "latest" revision of the docs. You
+should see the updated docs 5-10 minutes after the merge. The docs
+will appear on http://docs.docker.io/. For more information about
+documentation releases, see ``docs/README.md``
+
+### 9. Go to github to merge the bump_$VERSION into release
+
+Don't forget to push that pretty blue button to delete the leftover
+branch afterwards!
+
+### 10. Publish binaries
 
 To run this you will need access to the release credentials.
 Get them from [the infrastructure maintainers](
 https://github.com/dotcloud/docker/blob/master/hack/infrastructure/MAINTAINERS).
 
 ```bash
+git checkout release
+git fetch
+git reset --hard origin/release
 docker build -t docker .
 docker run  \
-	-e AWS_S3_BUCKET=get-nightly.docker.io \
-	-e AWS_ACCESS_KEY=$(cat ~/.aws/access_key) \
-	-e AWS_SECRET_KEY=$(cat ~/.aws/secret_key) \
-	-e GPG_PASSPHRASE=supersecretsesame \
-	docker
-	hack/release.sh
+       -e AWS_S3_BUCKET=test.docker.io \
+       -e AWS_ACCESS_KEY=$(cat ~/.aws/access_key) \
+       -e AWS_SECRET_KEY=$(cat ~/.aws/secret_key) \
+       -e GPG_PASSPHRASE=supersecretsesame \
+       -i -t -privileged \
+       docker \
+       hack/release.sh
 ```
 
-It will build and upload the binaries on the specified bucket (you should
-use get-nightly.docker.io for general testing, and once everything is fine,
-switch to get.docker.io).
+It will run the test suite one more time, build the binaries and packages,
+and upload to the specified bucket (you should use test.docker.io for
+general testing, and once everything is fine, switch to get.docker.io).
 
-
-### 9. Rejoice!
+### 11. Rejoice and Evangelize!
 
 Congratulations! You're done.
+
+Go forth and announce the glad tidings of the new release in `#docker`,
+`#docker-dev`, on the [mailing list](https://groups.google.com/forum/#!forum/docker-dev),
+and on Twitter!

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,17 +11,28 @@ import (
 	"index/suffixarray"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+var (
+	IAMSTATIC bool   // whether or not Docker itself was compiled statically via ./hack/make.sh binary
+	INITSHA1  string // sha1sum of separate static dockerinit, if Docker itself was compiled dynamically via ./hack/make.sh dynbinary
+)
+
+// A common interface to access the Fatal method of
+// both testing.B and testing.T.
+type Fataler interface {
+	Fatal(args ...interface{})
+}
 
 // Go is a basic promise implementation: it wraps calls a function in a goroutine,
 // and returns a channel which will later return the function's return value.
@@ -33,7 +45,7 @@ func Go(f func() error) chan error {
 }
 
 // Request a given URL and return an io.Reader
-func Download(url string, stderr io.Writer) (*http.Response, error) {
+func Download(url string) (*http.Response, error) {
 	var resp *http.Response
 	var err error
 	if resp, err = http.Get(url); err != nil {
@@ -68,56 +80,6 @@ func Debugf(format string, a ...interface{}) {
 
 func Errorf(format string, a ...interface{}) {
 	logf("error", format, a...)
-}
-
-// Reader with progress bar
-type progressReader struct {
-	reader       io.ReadCloser // Stream to read from
-	output       io.Writer     // Where to send progress bar to
-	readTotal    int           // Expected stream length (bytes)
-	readProgress int           // How much has been read so far (bytes)
-	lastUpdate   int           // How many bytes read at least update
-	template     string        // Template to print. Default "%v/%v (%v)"
-	sf           *StreamFormatter
-	newLine      bool
-}
-
-func (r *progressReader) Read(p []byte) (n int, err error) {
-	read, err := io.ReadCloser(r.reader).Read(p)
-	r.readProgress += read
-	updateEvery := 1024 * 512 //512kB
-	if r.readTotal > 0 {
-		// Update progress for every 1% read if 1% < 512kB
-		if increment := int(0.01 * float64(r.readTotal)); increment < updateEvery {
-			updateEvery = increment
-		}
-	}
-	if r.readProgress-r.lastUpdate > updateEvery || err != nil {
-		if r.readTotal > 0 {
-			fmt.Fprintf(r.output, r.template, HumanSize(int64(r.readProgress)), HumanSize(int64(r.readTotal)), fmt.Sprintf("%.0f%%", float64(r.readProgress)/float64(r.readTotal)*100))
-		} else {
-			fmt.Fprintf(r.output, r.template, r.readProgress, "?", "n/a")
-		}
-		r.lastUpdate = r.readProgress
-	}
-	// Send newline when complete
-	if r.newLine && err != nil {
-		r.output.Write(r.sf.FormatStatus("", ""))
-	}
-	return read, err
-}
-func (r *progressReader) Close() error {
-	return io.ReadCloser(r.reader).Close()
-}
-func ProgressReader(r io.ReadCloser, size int, output io.Writer, tpl []byte, sf *StreamFormatter, newline bool) *progressReader {
-	return &progressReader{
-		reader:    r,
-		output:    NewWriteFlusher(output),
-		readTotal: size,
-		template:  string(tpl),
-		sf:        sf,
-		newLine:   newline,
-	}
 }
 
 // HumanDuration returns a human-readable approximation of a duration
@@ -159,6 +121,40 @@ func HumanSize(size int64) string {
 	return fmt.Sprintf("%.4g %s", sizef, units[i])
 }
 
+// Parses a human-readable string representing an amount of RAM
+// in bytes, kibibytes, mebibytes or gibibytes, and returns the
+// number of bytes, or -1 if the string is unparseable.
+// Units are case-insensitive, and the 'b' suffix is optional.
+func RAMInBytes(size string) (bytes int64, err error) {
+	re, error := regexp.Compile("^(\\d+)([kKmMgG])?[bB]?$")
+	if error != nil {
+		return -1, error
+	}
+
+	matches := re.FindStringSubmatch(size)
+
+	if len(matches) != 3 {
+		return -1, fmt.Errorf("Invalid size: '%s'", size)
+	}
+
+	memLimit, error := strconv.ParseInt(matches[1], 10, 0)
+	if error != nil {
+		return -1, error
+	}
+
+	unit := strings.ToLower(matches[2])
+
+	if unit == "k" {
+		memLimit *= 1024
+	} else if unit == "m" {
+		memLimit *= 1024 * 1024
+	} else if unit == "g" {
+		memLimit *= 1024 * 1024 * 1024
+	}
+
+	return memLimit, nil
+}
+
 func Trunc(s string, maxlen int) string {
 	if len(s) <= maxlen {
 		return s
@@ -177,6 +173,75 @@ func SelfPath() string {
 		panic(err)
 	}
 	return path
+}
+
+func dockerInitSha1(target string) string {
+	f, err := os.Open(target)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha1.New()
+	_, err = io.Copy(h, f)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func isValidDockerInitPath(target string, selfPath string) bool { // target and selfPath should be absolute (InitPath and SelfPath already do this)
+	if IAMSTATIC {
+		if target == selfPath {
+			return true
+		}
+		targetFileInfo, err := os.Lstat(target)
+		if err != nil {
+			return false
+		}
+		selfPathFileInfo, err := os.Lstat(selfPath)
+		if err != nil {
+			return false
+		}
+		return os.SameFile(targetFileInfo, selfPathFileInfo)
+	}
+	return INITSHA1 != "" && dockerInitSha1(target) == INITSHA1
+}
+
+// Figure out the path of our dockerinit (which may be SelfPath())
+func DockerInitPath(localCopy string) string {
+	selfPath := SelfPath()
+	if isValidDockerInitPath(selfPath, selfPath) {
+		// if we're valid, don't bother checking anything else
+		return selfPath
+	}
+	var possibleInits = []string{
+		localCopy,
+		filepath.Join(filepath.Dir(selfPath), "dockerinit"),
+
+		// FHS 3.0 Draft: "/usr/libexec includes internal binaries that are not intended to be executed directly by users or shell scripts. Applications may use a single subdirectory under /usr/libexec."
+		// http://www.linuxbase.org/betaspecs/fhs/fhs.html#usrlibexec
+		"/usr/libexec/docker/dockerinit",
+		"/usr/local/libexec/docker/dockerinit",
+
+		// FHS 2.3: "/usr/lib includes object files, libraries, and internal binaries that are not intended to be executed directly by users or shell scripts."
+		// http://refspecs.linuxfoundation.org/FHS_2.3/fhs-2.3.html#USRLIBLIBRARIESFORPROGRAMMINGANDPA
+		"/usr/lib/docker/dockerinit",
+		"/usr/local/lib/docker/dockerinit",
+	}
+	for _, dockerInit := range possibleInits {
+		path, err := exec.LookPath(dockerInit)
+		if err == nil {
+			path, err = filepath.Abs(path)
+			if err != nil {
+				// LookPath already validated that this file exists and is executable (following symlinks), so how could Abs fail?
+				panic(err)
+			}
+			if isValidDockerInitPath(path, selfPath) {
+				return path
+			}
+		}
+	}
+	return ""
 }
 
 type NopWriter struct{}
@@ -292,7 +357,7 @@ func (w *WriteBroadcaster) Write(p []byte) (n int, err error) {
 					w.buf.Write([]byte(line))
 					break
 				}
-				b, err := json.Marshal(&JSONLog{Log: line, Stream: sw.stream, Created: time.Now()})
+				b, err := json.Marshal(&JSONLog{Log: line, Stream: sw.stream, Created: time.Now().UTC()})
 				if err != nil {
 					// On error, evict the writer
 					delete(w.writers, sw)
@@ -423,7 +488,7 @@ func CopyEscapable(dst io.Writer, src io.ReadCloser) (written int64, err error) 
 					if err := src.Close(); err != nil {
 						return 0, err
 					}
-					return 0, io.EOF
+					return 0, nil
 				}
 			}
 			// ---- End of docker
@@ -617,6 +682,13 @@ func (wf *WriteFlusher) Write(b []byte) (n int, err error) {
 	return n, err
 }
 
+// Flush the stream immediately.
+func (wf *WriteFlusher) Flush() {
+	wf.Lock()
+	defer wf.Unlock()
+	wf.flusher.Flush()
+}
+
 func NewWriteFlusher(w io.Writer) *WriteFlusher {
 	var flusher http.Flusher
 	if f, ok := w.(http.Flusher); ok {
@@ -627,142 +699,11 @@ func NewWriteFlusher(w io.Writer) *WriteFlusher {
 	return &WriteFlusher{w: w, flusher: flusher}
 }
 
-type JSONError struct {
-	Code    int    `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
-type JSONMessage struct {
-	Status       string     `json:"status,omitempty"`
-	Progress     string     `json:"progress,omitempty"`
-	ErrorMessage string     `json:"error,omitempty"` //deprecated
-	ID           string     `json:"id,omitempty"`
-	From         string     `json:"from,omitempty"`
-	Time         int64      `json:"time,omitempty"`
-	Error        *JSONError `json:"errorDetail,omitempty"`
-}
-
-func (e *JSONError) Error() string {
-	return e.Message
-}
-
 func NewHTTPRequestError(msg string, res *http.Response) error {
 	return &JSONError{
 		Message: msg,
 		Code:    res.StatusCode,
 	}
-}
-
-func (jm *JSONMessage) Display(out io.Writer) error {
-	if jm.Error != nil {
-		if jm.Error.Code == 401 {
-			return fmt.Errorf("Authentication is required.")
-		}
-		return jm.Error
-	}
-	fmt.Fprintf(out, "%c[2K\r", 27)
-	if jm.Time != 0 {
-		fmt.Fprintf(out, "[%s] ", time.Unix(jm.Time, 0))
-	}
-	if jm.ID != "" {
-		fmt.Fprintf(out, "%s: ", jm.ID)
-	}
-	if jm.From != "" {
-		fmt.Fprintf(out, "(from %s) ", jm.From)
-	}
-	if jm.Progress != "" {
-		fmt.Fprintf(out, "%s %s\r", jm.Status, jm.Progress)
-	} else {
-		fmt.Fprintf(out, "%s\r\n", jm.Status)
-	}
-	return nil
-}
-
-func DisplayJSONMessagesStream(in io.Reader, out io.Writer) error {
-	dec := json.NewDecoder(in)
-	ids := make(map[string]int)
-	diff := 0
-	for {
-		jm := JSONMessage{}
-		if err := dec.Decode(&jm); err == io.EOF {
-			break
-		} else if err != nil {
-			return err
-		}
-		if jm.Progress != "" && jm.ID != "" {
-			line, ok := ids[jm.ID]
-			if !ok {
-				line = len(ids)
-				ids[jm.ID] = line
-				fmt.Fprintf(out, "\n")
-				diff = 0
-			} else {
-				diff = len(ids) - line
-			}
-			fmt.Fprintf(out, "%c[%dA", 27, diff)
-		}
-		err := jm.Display(out)
-		if jm.ID != "" {
-			fmt.Fprintf(out, "%c[%dB", 27, diff)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type StreamFormatter struct {
-	json bool
-	used bool
-}
-
-func NewStreamFormatter(json bool) *StreamFormatter {
-	return &StreamFormatter{json, false}
-}
-
-func (sf *StreamFormatter) FormatStatus(id, format string, a ...interface{}) []byte {
-	sf.used = true
-	str := fmt.Sprintf(format, a...)
-	if sf.json {
-		b, err := json.Marshal(&JSONMessage{ID: id, Status: str})
-		if err != nil {
-			return sf.FormatError(err)
-		}
-		return b
-	}
-	return []byte(str + "\r\n")
-}
-
-func (sf *StreamFormatter) FormatError(err error) []byte {
-	sf.used = true
-	if sf.json {
-		jsonError, ok := err.(*JSONError)
-		if !ok {
-			jsonError = &JSONError{Message: err.Error()}
-		}
-		if b, err := json.Marshal(&JSONMessage{Error: jsonError, ErrorMessage: err.Error()}); err == nil {
-			return b
-		}
-		return []byte("{\"error\":\"format error\"}")
-	}
-	return []byte("Error: " + err.Error() + "\r\n")
-}
-
-func (sf *StreamFormatter) FormatProgress(id, action, progress string) []byte {
-	sf.used = true
-	if sf.json {
-		b, err := json.Marshal(&JSONMessage{Status: action, Progress: progress, ID: id})
-		if err != nil {
-			return nil
-		}
-		return b
-	}
-	return []byte(action + " " + progress + "\r")
-}
-
-func (sf *StreamFormatter) Used() bool {
-	return sf.used
 }
 
 func IsURL(str string) bool {
@@ -818,18 +759,42 @@ func StripComments(input []byte, commentMarker []byte) []byte {
 	return output
 }
 
-func ParseHost(host string, port int, addr string) string {
-	if strings.HasPrefix(addr, "unix://") {
-		return addr
+// GetNameserversAsCIDR returns nameservers (if any) listed in
+// /etc/resolv.conf as CIDR blocks (e.g., "1.2.3.4/32")
+// This function's output is intended for net.ParseCIDR
+func GetNameserversAsCIDR(resolvConf []byte) []string {
+	var parsedResolvConf = StripComments(resolvConf, []byte("#"))
+	nameservers := []string{}
+	re := regexp.MustCompile(`^\s*nameserver\s*(([0-9]+\.){3}([0-9]+))\s*$`)
+	for _, line := range bytes.Split(parsedResolvConf, []byte("\n")) {
+		var ns = re.FindSubmatch(line)
+		if len(ns) > 0 {
+			nameservers = append(nameservers, string(ns[1])+"/32")
+		}
 	}
-	if strings.HasPrefix(addr, "tcp://") {
+
+	return nameservers
+}
+
+func ParseHost(host string, port int, addr string) (string, error) {
+	var proto string
+	switch {
+	case strings.HasPrefix(addr, "unix://"):
+		return addr, nil
+	case strings.HasPrefix(addr, "tcp://"):
+		proto = "tcp"
 		addr = strings.TrimPrefix(addr, "tcp://")
+	default:
+		if strings.Contains(addr, "://") {
+			return "", fmt.Errorf("Invalid bind address protocol: %s", addr)
+		}
+		proto = "tcp"
 	}
+
 	if strings.Contains(addr, ":") {
 		hostParts := strings.Split(addr, ":")
 		if len(hostParts) != 2 {
-			log.Fatal("Invalid bind address format.")
-			os.Exit(-1)
+			return "", fmt.Errorf("Invalid bind address format: %s", addr)
 		}
 		if hostParts[0] != "" {
 			host = hostParts[0]
@@ -840,7 +805,7 @@ func ParseHost(host string, port int, addr string) string {
 	} else {
 		host = addr
 	}
-	return fmt.Sprintf("tcp://%s:%d", host, port)
+	return fmt.Sprintf("%s://%s:%d", proto, host, port), nil
 }
 
 func GetReleaseVersion() string {
@@ -973,7 +938,7 @@ func (graph *DependencyGraph) GenerateTraversalMap() ([][]string, error) {
 	for len(processed) < len(graph.nodes) {
 		// Use a temporary buffer for processed nodes, otherwise
 		// nodes that depend on each other could end up in the same round.
-		tmp_processed := []*DependencyNode{}
+		tmpProcessed := []*DependencyNode{}
 		for _, node := range graph.nodes {
 			// If the node has more dependencies than what we have cleared,
 			// it won't be valid for this round.
@@ -987,7 +952,7 @@ func (graph *DependencyGraph) GenerateTraversalMap() ([][]string, error) {
 			// It's not been processed yet and has 0 deps. Add it!
 			// (this is a shortcut for what we're doing below)
 			if node.Degree() == 0 {
-				tmp_processed = append(tmp_processed, node)
+				tmpProcessed = append(tmpProcessed, node)
 				continue
 			}
 			// If at least one dep hasn't been processed yet, we can't
@@ -1001,17 +966,17 @@ func (graph *DependencyGraph) GenerateTraversalMap() ([][]string, error) {
 			}
 			// All deps have already been processed. Add it!
 			if ok {
-				tmp_processed = append(tmp_processed, node)
+				tmpProcessed = append(tmpProcessed, node)
 			}
 		}
-		Debugf("Round %d: found %d available nodes", len(result), len(tmp_processed))
+		Debugf("Round %d: found %d available nodes", len(result), len(tmpProcessed))
 		// If no progress has been made this round,
 		// that means we have circular dependencies.
-		if len(tmp_processed) == 0 {
+		if len(tmpProcessed) == 0 {
 			return nil, fmt.Errorf("Could not find a solution to this dependency graph")
 		}
 		round := []string{}
-		for _, nd := range tmp_processed {
+		for _, nd := range tmpProcessed {
 			round = append(round, nd.id)
 			processed[nd] = true
 		}
@@ -1022,9 +987,133 @@ func (graph *DependencyGraph) GenerateTraversalMap() ([][]string, error) {
 
 // An StatusError reports an unsuccessful exit by a command.
 type StatusError struct {
-	Status int
+	Status     string
+	StatusCode int
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("Status: %d", e.Status)
+	return fmt.Sprintf("Status: %s, Code: %d", e.Status, e.StatusCode)
+}
+
+func quote(word string, buf *bytes.Buffer) {
+	// Bail out early for "simple" strings
+	if word != "" && !strings.ContainsAny(word, "\\'\"`${[|&;<>()~*?! \t\n") {
+		buf.WriteString(word)
+		return
+	}
+
+	buf.WriteString("'")
+
+	for i := 0; i < len(word); i++ {
+		b := word[i]
+		if b == '\'' {
+			// Replace literal ' with a close ', a \', and a open '
+			buf.WriteString("'\\''")
+		} else {
+			buf.WriteByte(b)
+		}
+	}
+
+	buf.WriteString("'")
+}
+
+// Take a list of strings and escape them so they will be handled right
+// when passed as arguments to an program via a shell
+func ShellQuoteArguments(args []string) string {
+	var buf bytes.Buffer
+	for i, arg := range args {
+		if i != 0 {
+			buf.WriteByte(' ')
+		}
+		quote(arg, &buf)
+	}
+	return buf.String()
+}
+
+func IsClosedError(err error) bool {
+	/* This comparison is ugly, but unfortunately, net.go doesn't export errClosing.
+	 * See:
+	 * http://golang.org/src/pkg/net/net.go
+	 * https://code.google.com/p/go/issues/detail?id=4337
+	 * https://groups.google.com/forum/#!msg/golang-nuts/0_aaCvBmOcM/SptmDyX1XJMJ
+	 */
+	return strings.HasSuffix(err.Error(), "use of closed network connection")
+}
+
+func PartParser(template, data string) (map[string]string, error) {
+	// ip:public:private
+	var (
+		templateParts = strings.Split(template, ":")
+		parts         = strings.Split(data, ":")
+		out           = make(map[string]string, len(templateParts))
+	)
+	if len(parts) != len(templateParts) {
+		return nil, fmt.Errorf("Invalid format to parse.  %s should match template %s", data, template)
+	}
+
+	for i, t := range templateParts {
+		value := ""
+		if len(parts) > i {
+			value = parts[i]
+		}
+		out[t] = value
+	}
+	return out, nil
+}
+
+var globalTestID string
+
+// TestDirectory creates a new temporary directory and returns its path.
+// The contents of directory at path `templateDir` is copied into the
+// new directory.
+func TestDirectory(templateDir string) (dir string, err error) {
+	if globalTestID == "" {
+		globalTestID = RandomString()[:4]
+	}
+	prefix := fmt.Sprintf("docker-test%s-%s-", globalTestID, GetCallerName(2))
+	if prefix == "" {
+		prefix = "docker-test-"
+	}
+	dir, err = ioutil.TempDir("", prefix)
+	if err = os.Remove(dir); err != nil {
+		return
+	}
+	if templateDir != "" {
+		if err = CopyDirectory(templateDir, dir); err != nil {
+			return
+		}
+	}
+	return
+}
+
+// GetCallerName introspects the call stack and returns the name of the
+// function `depth` levels down in the stack.
+func GetCallerName(depth int) string {
+	// Use the caller function name as a prefix.
+	// This helps trace temp directories back to their test.
+	pc, _, _, _ := runtime.Caller(depth + 1)
+	callerLongName := runtime.FuncForPC(pc).Name()
+	parts := strings.Split(callerLongName, ".")
+	callerShortName := parts[len(parts)-1]
+	return callerShortName
+}
+
+func CopyFile(src, dst string) (int64, error) {
+	if src == dst {
+		return 0, nil
+	}
+	sf, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer sf.Close()
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	df, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer df.Close()
+	return io.Copy(df, sf)
 }

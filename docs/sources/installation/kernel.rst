@@ -11,9 +11,9 @@ In short, Docker has the following kernel requirements:
 
 - Linux version 3.8 or above.
 
-- `Device Mapper support <http://www.sourceware.org/dm/>`_.
-
 - Cgroups and namespaces must be enabled.
+
+*Note: as of 0.7 docker no longer requires aufs. AUFS support is still available as an optional driver.*
 
 The officially supported kernel is the one recommended by the
 :ref:`ubuntu_linux` installation path. It is the one that most developers
@@ -24,6 +24,7 @@ please try to reproduce it with the official kernels first.
 If you cannot or do not want to use the "official" kernels,
 here is some technical background about the features (both optional and
 mandatory) that docker needs to run successfully.
+
 
 Linux version 3.8 or above
 --------------------------
@@ -39,6 +40,15 @@ The symptoms include:
 - kernel crash causing the machine to freeze for a few minutes, or even
   completely.
 
+Additionally, kernels prior 3.4 did not implement ``reboot_pid_ns``,
+which means that the ``reboot()`` syscall could reboot the host machine,
+instead of terminating the container. To work around that problem,
+LXC userland tools (since version 0.8) automatically drop the ``SYS_BOOT``
+capability when necessary. Still, if you run a pre-3.4 kernel with pre-0.8
+LXC tools, be aware that containers can reboot the whole host! This is
+not something that Docker wants to address in the short term, since you
+shouldn't use kernels prior 3.8 with Docker anyway.
+
 While it is still possible to use older kernels for development, it is
 really not advised to do so.
 
@@ -46,19 +56,6 @@ Docker checks the kernel version when it starts, and emits a warning if it
 detects something older than 3.8.
 
 See issue `#407 <https://github.com/dotcloud/docker/issues/407>`_ for details.
-
-
-Device Mapper support
----------------------
-
-The `Device Mapper <http://www.sourceware.org/dm/>`_ replaces the
-previous Docker dependency on AUFS and has been in the kernel since
-2.6.9, so the device-mapper module is more broadly-supported across
-Linux distributions. Docker uses `thin-provisioning
-<https://github.com/mirrors/linux/blob/master/Documentation/device-mapper/thin-provisioning.txt>`_
-to provide a :ref:`unioning file system <ufs_def>`. If you'd like to
-check for the presence of the device-mapper module, please see the
-`LVM-HOWTO. <http://www.tldp.org/HOWTO/LVM-HOWTO/builddmmod.html>`_
 
 
 Cgroups and namespaces
@@ -114,3 +111,40 @@ And replace it by the following one::
     GRUB_CMDLINE_LINUX="cgroup_enable=memory swapaccount=1"
 
 Then run ``update-grub``, and reboot.
+
+Details
+-------
+
+Networking:
+
+- CONFIG_BRIDGE
+- CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
+- CONFIG_NF_NAT
+- CONFIG_NF_NAT_IPV4
+- CONFIG_NF_NAT_NEEDED
+
+LVM:
+
+- CONFIG_BLK_DEV_DM
+- CONFIG_DM_THIN_PROVISIONING
+- CONFIG_EXT4_FS
+
+Namespaces:
+
+- CONFIG_NAMESPACES
+- CONFIG_UTS_NS
+- CONFIG_IPC_NS
+- CONFIG_UID_NS
+- CONFIG_PID_NS
+- CONFIG_NET_NS
+
+Cgroups:
+
+- CONFIG_CGROUPS
+
+Cgroup controllers (optional but highly recommended):
+
+- CONFIG_CGROUP_CPUACCT
+- CONFIG_BLK_CGROUP
+- CONFIG_MEMCG
+- CONFIG_MEMCG_SWAP

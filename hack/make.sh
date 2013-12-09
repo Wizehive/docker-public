@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # This script builds various binary artifacts from a checkout of the docker
 # source code.
@@ -19,7 +20,7 @@
 #   "docker run hack/make.sh" in the resulting container image.
 #
 
-set -e
+set -o pipefail
 
 # We're a nice, sexy, little shell script, and people might try to run us;
 # but really, they shouldn't. We want to be in a container!
@@ -32,20 +33,34 @@ grep -q "$RESOLVCONF" /proc/mounts || {
 
 # List of bundles to create when no argument is passed
 DEFAULT_BUNDLES=(
-	test
 	binary
+	test
+	dynbinary
+	dyntest
+	tgz
 	ubuntu
 )
 
 VERSION=$(cat ./VERSION)
-GITCOMMIT=$(git rev-parse --short HEAD)
-if [ -n "$(git status --porcelain)" ]; then
-	GITCOMMIT="$GITCOMMIT-dirty"
+if [ -d .git ] && command -v git &> /dev/null; then
+	GITCOMMIT=$(git rev-parse --short HEAD)
+	if [ -n "$(git status --porcelain)" ]; then
+		GITCOMMIT="$GITCOMMIT-dirty"
+	fi
+elif [ "$DOCKER_GITCOMMIT" ]; then
+	GITCOMMIT="$DOCKER_GITCOMMIT"
+else
+	echo >&2 'error: .git directory missing and DOCKER_GITCOMMIT not specified'
+	echo >&2 '  Please either build with the .git directory accessible, or specify the'
+	echo >&2 '  exact (--short) commit hash you are building using DOCKER_GITCOMMIT for'
+	echo >&2 '  future accountability in diagnosing build issues.  Thanks!'
+	exit 1
 fi
 
 # Use these flags when compiling the tests and final binary
-LDFLAGS="-X main.GITCOMMIT $GITCOMMIT -X main.VERSION $VERSION -d -w"
-
+LDFLAGS='-X main.GITCOMMIT "'$GITCOMMIT'" -X main.VERSION "'$VERSION'" -w'
+LDFLAGS_STATIC='-X github.com/dotcloud/docker/utils.IAMSTATIC true -linkmode external -extldflags "-lpthread -static -Wl,--unresolved-symbols=ignore-in-object-files"'
+BUILDFLAGS='-tags netgo'
 
 bundle() {
 	bundlescript=$1
@@ -66,7 +81,7 @@ main() {
 	fi
 	SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 	if [ $# -lt 1 ]; then
-		bundles=($DEFAULT_BUNDLES)
+		bundles=(${DEFAULT_BUNDLES[@]})
 	else
 		bundles=($@)
 	fi

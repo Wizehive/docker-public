@@ -22,18 +22,150 @@ Docker Remote API
 - Since API version 1.2, the auth configuration is now handled client
   side, so the client has to send the authConfig as POST in
   /images/(name)/push
-- Known client libraries may be found in :ref:`remote_api_client_libs`
 
 2. Versions
 ===========
 
-The current version of the API is 1.6
+The current version of the API is 1.7
 
 Calling /images/<name>/insert is the same as calling
-/v1.6/images/<name>/insert
+/v1.7/images/<name>/insert
 
 You can still call an old version of the api using
 /v1.0/images/<name>/insert
+
+
+v1.8
+****
+
+Full Documentation
+------------------
+
+:doc:`docker_remote_api_v1.8`
+
+What's new
+----------
+
+.. http:post:: /build
+
+   **New!** This endpoint now returns build status as json stream. In case
+   of a build error, it returns the exit status of the failed command.
+
+.. http:get:: /containers/(id)/json
+
+    **New!** This endpoint now returns the host config for the container.
+
+.. http:post:: /images/create
+.. http:post:: /images/(name)/insert
+.. http:post:: /images/(name)/push
+
+  **New!** progressDetail object was added in the JSON. It's now possible
+  to get the current value and the total of the progress without having to
+  parse the string.
+
+v1.7
+****
+
+Full Documentation
+------------------
+
+:doc:`docker_remote_api_v1.7`
+
+What's new
+----------
+
+.. http:get:: /images/json
+
+   The format of the json returned from this uri changed.  Instead of an entry
+   for each repo/tag on an image, each image is only represented once, with a
+   nested attribute indicating the repo/tags that apply to that image.
+
+   Instead of:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Content-Type: application/json
+
+      [
+        {
+          "VirtualSize": 131506275,
+          "Size": 131506275,
+          "Created": 1365714795,
+          "Id": "8dbd9e392a964056420e5d58ca5cc376ef18e2de93b5cc90e868a1bbc8318c1c",
+          "Tag": "12.04",
+          "Repository": "ubuntu"
+        },
+        {
+          "VirtualSize": 131506275,
+          "Size": 131506275,
+          "Created": 1365714795,
+          "Id": "8dbd9e392a964056420e5d58ca5cc376ef18e2de93b5cc90e868a1bbc8318c1c",
+          "Tag": "latest",
+          "Repository": "ubuntu"
+        },
+        {
+          "VirtualSize": 131506275,
+          "Size": 131506275,
+          "Created": 1365714795,
+          "Id": "8dbd9e392a964056420e5d58ca5cc376ef18e2de93b5cc90e868a1bbc8318c1c",
+          "Tag": "precise",
+          "Repository": "ubuntu"
+        },
+        {
+          "VirtualSize": 180116135,
+          "Size": 24653,
+          "Created": 1364102658,
+          "Id": "b750fe79269d2ec9a3c593ef05b4332b1d1a02a62b4accb2c21d589ff2f5f2dc",
+          "Tag": "12.10",
+          "Repository": "ubuntu"
+        },
+        {
+          "VirtualSize": 180116135,
+          "Size": 24653,
+          "Created": 1364102658,
+          "Id": "b750fe79269d2ec9a3c593ef05b4332b1d1a02a62b4accb2c21d589ff2f5f2dc",
+          "Tag": "quantal",
+          "Repository": "ubuntu"
+        }
+      ]
+
+   The returned json looks like this:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Content-Type: application/json
+      
+      [
+        {
+           "RepoTag": [
+             "ubuntu:12.04",
+             "ubuntu:precise",
+             "ubuntu:latest"
+           ],
+           "Id": "8dbd9e392a964056420e5d58ca5cc376ef18e2de93b5cc90e868a1bbc8318c1c",
+           "Created": 1365714795,
+           "Size": 131506275,
+           "VirtualSize": 131506275
+        },
+        {
+           "RepoTag": [
+             "ubuntu:12.10",
+             "ubuntu:quantal"
+           ],
+           "ParentId": "27cf784147099545",
+           "Id": "b750fe79269d2ec9a3c593ef05b4332b1d1a02a62b4accb2c21d589ff2f5f2dc",
+           "Created": 1364102658,
+           "Size": 24653,
+           "VirtualSize": 180116135
+        }
+      ]
+
+.. http:get:: /images/viz
+
+   This URI no longer exists.  The ``images -viz`` output is now generated in
+   the client, using the ``/images/json`` data.
 
 v1.6
 ****

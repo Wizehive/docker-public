@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"strings"
 	"text/template"
 )
 
@@ -11,7 +12,6 @@ lxc.utsname = {{.Config.Hostname}}
 {{else}}
 lxc.utsname = {{.Id}}
 {{end}}
-#lxc.aa_profile = unconfined
 
 {{if .Config.NetworkDisabled}}
 # network is disabled (-n=false)
@@ -32,8 +32,8 @@ lxc.rootfs = {{$ROOTFS}}
 
 {{if and .HostnamePath .HostsPath}}
 # enable domain name support
-lxc.mount.entry = {{.HostnamePath}} {{$ROOTFS}}/etc/hostname none bind,ro 0 0
-lxc.mount.entry = {{.HostsPath}} {{$ROOTFS}}/etc/hosts none bind,ro 0 0
+lxc.mount.entry = {{escapeFstabSpaces .HostnamePath}} {{escapeFstabSpaces $ROOTFS}}/etc/hostname none bind,ro 0 0
+lxc.mount.entry = {{escapeFstabSpaces .HostsPath}} {{escapeFstabSpaces $ROOTFS}}/etc/hosts none bind,ro 0 0
 {{end}}
 
 # use a dedicated pts for the container (and limit the number of pseudo terminal
@@ -46,7 +46,7 @@ lxc.console = none
 # no controlling tty at all
 lxc.tty = 1
 
-{{if .Config.Privileged}}
+{{if (getHostConfig .).Privileged}}
 lxc.cgroup.devices.allow = a 
 {{else}}
 # no implicit access to devices
@@ -66,7 +66,7 @@ lxc.cgroup.devices.allow = c 4:1 rwm
 lxc.cgroup.devices.allow = c 1:9 rwm
 lxc.cgroup.devices.allow = c 1:8 rwm
 
-# /dev/pts/* - pts namespaces are "coming soon"
+# /dev/pts/ - pts namespaces are "coming soon"
 lxc.cgroup.devices.allow = c 136:* rwm
 lxc.cgroup.devices.allow = c 5:2 rwm
 
@@ -81,37 +81,47 @@ lxc.cgroup.devices.allow = c 10:200 rwm
 {{end}}
 
 # standard mount point
+# Use mnt.putold as per https://bugs.launchpad.net/ubuntu/+source/lxc/+bug/986385
+lxc.pivotdir = lxc_putold
 #  WARNING: procfs is a known attack vector and should probably be disabled
 #           if your userspace allows it. eg. see http://blog.zx2c4.com/749
-lxc.mount.entry = proc {{$ROOTFS}}/proc proc nosuid,nodev,noexec 0 0
+lxc.mount.entry = proc {{escapeFstabSpaces $ROOTFS}}/proc proc nosuid,nodev,noexec 0 0
 #  WARNING: sysfs is a known attack vector and should probably be disabled
 #           if your userspace allows it. eg. see http://bit.ly/T9CkqJ
-lxc.mount.entry = sysfs {{$ROOTFS}}/sys sysfs nosuid,nodev,noexec 0 0
-lxc.mount.entry = devpts {{$ROOTFS}}/dev/pts devpts newinstance,ptmxmode=0666,nosuid,noexec 0 0
-#lxc.mount.entry = varrun {{$ROOTFS}}/var/run tmpfs mode=755,size=4096k,nosuid,nodev,noexec 0 0
-#lxc.mount.entry = varlock {{$ROOTFS}}/var/lock tmpfs size=1024k,nosuid,nodev,noexec 0 0
-lxc.mount.entry = shm {{$ROOTFS}}/dev/shm tmpfs size=65536k,nosuid,nodev,noexec 0 0
+lxc.mount.entry = sysfs {{escapeFstabSpaces $ROOTFS}}/sys sysfs nosuid,nodev,noexec 0 0
+lxc.mount.entry = devpts {{escapeFstabSpaces $ROOTFS}}/dev/pts devpts newinstance,ptmxmode=0666,nosuid,noexec 0 0
+#lxc.mount.entry = varrun {{escapeFstabSpaces $ROOTFS}}/var/run tmpfs mode=755,size=4096k,nosuid,nodev,noexec 0 0
+#lxc.mount.entry = varlock {{escapeFstabSpaces $ROOTFS}}/var/lock tmpfs size=1024k,nosuid,nodev,noexec 0 0
+lxc.mount.entry = shm {{escapeFstabSpaces $ROOTFS}}/dev/shm tmpfs size=65536k,nosuid,nodev,noexec 0 0
 
-# Inject docker-init
-lxc.mount.entry = {{.SysInitPath}} {{$ROOTFS}}/.dockerinit none bind,ro 0 0
+# Inject dockerinit
+lxc.mount.entry = {{escapeFstabSpaces .SysInitPath}} {{escapeFstabSpaces $ROOTFS}}/.dockerinit none bind,ro 0 0
+
+# Inject env
+lxc.mount.entry = {{escapeFstabSpaces .EnvConfigPath}} {{escapeFstabSpaces $ROOTFS}}/.dockerenv none bind,ro 0 0
 
 # In order to get a working DNS environment, mount bind (ro) the host's /etc/resolv.conf into the container
-lxc.mount.entry = {{.ResolvConfPath}} {{$ROOTFS}}/etc/resolv.conf none bind,ro 0 0
+lxc.mount.entry = {{escapeFstabSpaces .ResolvConfPath}} {{escapeFstabSpaces $ROOTFS}}/etc/resolv.conf none bind,ro 0 0
 {{if .Volumes}}
 {{ $rw := .VolumesRW }}
 {{range $virtualPath, $realPath := .Volumes}}
-lxc.mount.entry = {{$realPath}} {{$ROOTFS}}/{{$virtualPath}} none bind,{{ if index $rw $virtualPath }}rw{{else}}ro{{end}} 0 0
+lxc.mount.entry = {{escapeFstabSpaces $realPath}} {{escapeFstabSpaces $ROOTFS}}/{{escapeFstabSpaces $virtualPath}} none bind,{{ if index $rw $virtualPath }}rw{{else}}ro{{end}} 0 0
 {{end}}
 {{end}}
 
-{{if .Config.Privileged}}
+{{if (getHostConfig .).Privileged}}
 # retain all capabilities; no lxc.cap.drop line
+{{if (getCapabilities .).AppArmor}}
+lxc.aa_profile = unconfined
+{{else}}
+#lxc.aa_profile = unconfined
+{{end}}
 {{else}}
 # drop linux capabilities (apply mainly to the user root in the container)
 #  (Note: 'lxc.cap.keep' is coming soon and should replace this under the
 #         security principle 'deny all unless explicitly permitted', see
 #         http://sourceforge.net/mailarchive/message.php?msg_id=31054627 )
-lxc.cap.drop = audit_control audit_write mac_admin mac_override mknod setpcap sys_admin sys_boot sys_module sys_nice sys_pacct sys_rawio sys_resource sys_time sys_tty_config
+lxc.cap.drop = audit_control audit_write mac_admin mac_override mknod setpcap sys_admin sys_module sys_nice sys_pacct sys_rawio sys_resource sys_time sys_tty_config
 {{end}}
 
 # limits
@@ -125,18 +135,21 @@ lxc.cgroup.memory.memsw.limit_in_bytes = {{$memSwap}}
 {{if .Config.CpuShares}}
 lxc.cgroup.cpu.shares = {{.Config.CpuShares}}
 {{end}}
-`
 
-const LxcHostConfigTemplate = `
-{{if .LxcConf}}
-{{range $pair := .LxcConf}}
+{{if (getHostConfig .).LxcConf}}
+{{range $pair := (getHostConfig .).LxcConf}}
 {{$pair.Key}} = {{$pair.Value}}
 {{end}}
 {{end}}
 `
 
 var LxcTemplateCompiled *template.Template
-var LxcHostConfigTemplateCompiled *template.Template
+
+// Escape spaces in strings according to the fstab documentation, which is the
+// format for "lxc.mount.entry" lines in lxc.conf. See also "man 5 fstab".
+func escapeFstabSpaces(field string) string {
+	return strings.Replace(field, " ", "\\040", -1)
+}
 
 func getMemorySwap(config *Config) int64 {
 	// By default, MemorySwap is set to twice the size of RAM.
@@ -147,16 +160,23 @@ func getMemorySwap(config *Config) int64 {
 	return config.Memory * 2
 }
 
+func getHostConfig(container *Container) *HostConfig {
+	return container.hostConfig
+}
+
+func getCapabilities(container *Container) *Capabilities {
+	return container.runtime.capabilities
+}
+
 func init() {
 	var err error
 	funcMap := template.FuncMap{
-		"getMemorySwap": getMemorySwap,
+		"getMemorySwap":     getMemorySwap,
+		"getHostConfig":     getHostConfig,
+		"getCapabilities":   getCapabilities,
+		"escapeFstabSpaces": escapeFstabSpaces,
 	}
 	LxcTemplateCompiled, err = template.New("lxc").Funcs(funcMap).Parse(LxcTemplate)
-	if err != nil {
-		panic(err)
-	}
-	LxcHostConfigTemplateCompiled, err = template.New("lxc-hostconfig").Funcs(funcMap).Parse(LxcHostConfigTemplate)
 	if err != nil {
 		panic(err)
 	}
